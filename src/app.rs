@@ -5,7 +5,7 @@ use egui::{Color32, ComboBox};
 
 use crate::audio::{self, AudioDevice, AudioPlayback};
 use crate::platform;
-use crate::types::{DeviceInfo, VideoFrame};
+use crate::types::{DeviceInfo, VideoFormat, VideoFrame};
 
 pub struct App {
     video_devices: Vec<DeviceInfo>,
@@ -32,6 +32,7 @@ struct StatsState {
     fps: f32,
     drops_per_s: f32,
     decode_us: u64,
+    last_frame_format: Option<VideoFormat>,
 }
 
 impl StatsState {
@@ -43,6 +44,7 @@ impl StatsState {
             fps: 0.0,
             drops_per_s: 0.0,
             decode_us: 0,
+            last_frame_format: None,
         }
     }
 
@@ -53,6 +55,11 @@ impl StatsState {
         self.fps = 0.0;
         self.drops_per_s = 0.0;
         self.decode_us = 0;
+        self.last_frame_format = None;
+    }
+
+    fn update_frame(&mut self, frame: &VideoFrame) {
+        self.last_frame_format = Some(frame.format);
     }
 }
 
@@ -127,6 +134,11 @@ impl App {
         let mut latest = None;
         while let Ok(frame) = cap.rx.try_recv() {
             latest = Some(frame);
+        }
+        if self.show_stats {
+            if let Some(frame) = latest.as_ref() {
+                self.stats.update_frame(frame);
+            }
         }
         latest
     }
@@ -215,6 +227,9 @@ impl App {
                         ui.label(format!("Decode: {} us", self.stats.decode_us));
                         ui.label(format!("Drops/s: {:.1}", self.stats.drops_per_s));
                         ui.label(format!("Queue: {queue_len}"));
+                        if let Some(fmt) = self.stats.last_frame_format {
+                            ui.label(format!("Frame: {}", Self::format_name(fmt)));
+                        }
                     });
             }
         }
@@ -299,6 +314,14 @@ impl App {
             self.stats.last_at = now;
         }
         self.stats.decode_us = snap.decode_us;
+    }
+
+    fn format_name(format: VideoFormat) -> &'static str {
+        match format {
+            VideoFormat::Rgba => "RGBA",
+            VideoFormat::Yuyv => "YUYV",
+            VideoFormat::Nv12 => "NV12",
+        }
     }
 
     fn set_audio(&mut self, sel: Option<usize>) {

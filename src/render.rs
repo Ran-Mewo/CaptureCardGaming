@@ -154,6 +154,8 @@ impl RenderState {
             wgpu::PresentMode::Immediate
         } else if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
+        } else if caps.present_modes.contains(&wgpu::PresentMode::FifoRelaxed) {
+            wgpu::PresentMode::FifoRelaxed
         } else {
             wgpu::PresentMode::Fifo
         };

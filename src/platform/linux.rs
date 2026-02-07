@@ -154,12 +154,13 @@ fn best_choice_for_fourcc(dev: &Device, fourcc: FourCC) -> Option<FormatChoice> 
             let better = match &best {
                 None => true,
                 Some(cur) => {
-                    let cur_fps = cur.fps.unwrap_or(0.0);
-                    let new_fps = fps.unwrap_or(0.0);
-                    if (new_fps - cur_fps).abs() > 0.5 {
-                        new_fps > cur_fps
+                    let cur_area = cur.width * cur.height;
+                    if area != cur_area {
+                        area > cur_area
                     } else {
-                        area > cur.width * cur.height
+                        let cur_fps = cur.fps.unwrap_or(0.0);
+                        let new_fps = fps.unwrap_or(0.0);
+                        new_fps > cur_fps
                     }
                 }
             };
@@ -240,18 +241,33 @@ pub fn spawn_capture(
     stop: Arc<AtomicBool>,
     stats: Arc<CaptureStats>,
 ) -> Result<(JoinHandle<()>, VideoInfo)> {
-    if let Ok((handle, info)) = spawn_capture_gst(
-        id,
-        max_size,
-        tx.clone(),
-        drop_rx.clone(),
-        stop.clone(),
-        stats.clone(),
-    ) {
-        return Ok((handle, info));
+    let mut dev = Device::with_path(id)?;
+    let (fmt, fps) = select_format(&dev, max_size)?;
+    if let Some(fps) = fps {
+        let _ = dev.set_params(&v4l::video::capture::Parameters::with_fps(fps));
     }
-    let dev = Device::with_path(id)?;
-    let (fmt, _fps) = select_format(&dev, max_size)?;
+    if fmt.fourcc == FourCC::new(b"MJPG") {
+        if let Some(decoder) = mjpeg_hw_decoder() {
+            drop(dev);
+            if let Ok((handle, info)) = spawn_capture_gst(
+                id,
+                fmt,
+                fps,
+                decoder,
+                tx.clone(),
+                drop_rx.clone(),
+                stop.clone(),
+                stats.clone(),
+            ) {
+                return Ok((handle, info));
+            }
+            dev = Device::with_path(id)?;
+            let _ = dev.set_format(&fmt);
+            if let Some(fps) = fps {
+                let _ = dev.set_params(&v4l::video::capture::Parameters::with_fps(fps));
+            }
+        }
+    }
     let width = fmt.width;
     let height = fmt.height;
     let fourcc = fmt.fourcc;
@@ -259,7 +275,7 @@ pub fn spawn_capture(
         width,
         height,
         format: format!("{fourcc}"),
-        fps: None,
+        fps,
     };
     let stride = if fmt.stride == 0 {
         match fourcc {
@@ -437,13 +453,12 @@ fn color_info_from_gst(info: &GstVideoInfo, source_fourcc: FourCC) -> ColorInfo 
     out
 }
 
-fn mjpeg_decoder() -> Option<&'static str> {
+fn mjpeg_hw_decoder() -> Option<&'static str> {
     for name in [
         "nvjpegdec",
         "vaapijpegdec",
         "v4l2jpegdec",
-        "jpegdec",
-        "avdec_mjpeg",
+        "qsvjpegdec",
     ] {
         if gst::ElementFactory::find(name).is_some() {
             return Some(name);
@@ -452,46 +467,40 @@ fn mjpeg_decoder() -> Option<&'static str> {
     None
 }
 
-fn gst_pipeline(
+fn mjpeg_pipeline_variants(
     device: &str,
-    fmt: FourCC,
     width: u32,
     height: u32,
-    mjpeg_decoder: Option<&str>,
-) -> String {
-    let base = format!("v4l2src device={device} do-timestamp=true");
+    fps: Option<u32>,
+    decoder: &str,
+) -> Vec<String> {
+    let base = format!("v4l2src device={device} io-mode=2 do-timestamp=true");
     let queue = "queue leaky=downstream max-size-buffers=1 max-size-time=0 max-size-bytes=0";
     let appsink =
-        "appsink name=sink max-buffers=1 drop=true sync=false enable-last-sample=false";
-    if fmt == FourCC::new(b"MJPG") {
-        if let Some(decoder) = mjpeg_decoder {
-            format!(
-                "{base} ! image/jpeg ! {queue} ! {decoder} ! videoconvert ! video/x-raw,format=NV12,width={width},height={height} ! {appsink}"
-            )
-        } else {
-            format!(
-                "{base} ! image/jpeg ! {queue} ! decodebin ! videoconvert ! video/x-raw,format=NV12,width={width},height={height} ! {appsink}"
-            )
-        }
-    } else if fmt == FourCC::new(b"NV12") {
-        format!(
-            "{base} ! video/x-raw,format=NV12,width={width},height={height} ! {queue} ! {appsink}"
-        )
+        "appsink name=sink max-buffers=1 drop=true sync=false async=false enable-last-sample=false";
+    let fr = fps.map(|v| format!(",framerate={v}/1")).unwrap_or_default();
+    let caps = format!("video/x-raw,format=NV12,width={width},height={height}{fr}");
+    let jpegparse = if gst::ElementFactory::find("jpegparse").is_some() {
+        "jpegparse ! "
     } else {
-        format!(
-            "{base} ! video/x-raw,format=YUY2,width={width},height={height} ! {queue} ! {appsink}"
-        )
+        ""
+    };
+    let mut variants = Vec::new();
+    if decoder == "vaapijpegdec" && gst::ElementFactory::find("vaapipostproc").is_some() {
+        variants.push(format!(
+            "{base} ! image/jpeg{fr} ! {jpegparse}{queue} ! {decoder} ! vaapipostproc format=nv12 ! {caps} ! {appsink}"
+        ));
     }
+    variants.push(format!(
+        "{base} ! image/jpeg{fr} ! {jpegparse}{queue} ! {decoder} ! {queue} ! {caps} ! {appsink}"
+    ));
+    variants.push(format!(
+        "{base} ! image/jpeg{fr} ! {jpegparse}{queue} ! {decoder} ! {queue} ! videoconvert ! {caps} ! {appsink}"
+    ));
+    variants
 }
 
-fn build_pipeline(
-    device: &str,
-    fmt: FourCC,
-    width: u32,
-    height: u32,
-    mjpeg_decoder: Option<&str>,
-) -> Result<(gst::Pipeline, AppSink)> {
-    let pipeline_str = gst_pipeline(device, fmt, width, height, mjpeg_decoder);
+fn launch_pipeline(pipeline_str: &str) -> Result<(gst::Pipeline, AppSink)> {
     let pipeline = gst::parse::launch(&pipeline_str)?
         .downcast::<gst::Pipeline>()
         .map_err(|_| anyhow!("GStreamer pipeline type"))?;
@@ -509,51 +518,46 @@ fn build_pipeline(
     Ok((pipeline, appsink))
 }
 
+fn build_mjpeg_pipeline(
+    device: &str,
+    width: u32,
+    height: u32,
+    fps: Option<u32>,
+    decoder: &str,
+) -> Result<(gst::Pipeline, AppSink)> {
+    let mut last_err = None;
+    for pipeline_str in mjpeg_pipeline_variants(device, width, height, fps, decoder) {
+        match launch_pipeline(&pipeline_str) {
+            Ok(ok) => return Ok(ok),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("GStreamer failed to play")))
+}
+
 fn spawn_capture_gst(
     id: &str,
-    max_size: Option<(u32, u32)>,
+    fmt: v4l::Format,
+    fps: Option<u32>,
+    decoder: &str,
     tx: Sender<VideoFrame>,
     drop_rx: Receiver<VideoFrame>,
     stop: Arc<AtomicBool>,
     stats: Arc<CaptureStats>,
 ) -> Result<(JoinHandle<()>, VideoInfo)> {
     gst::init()?;
-    let dev = Device::with_path(id)?;
-    let (fmt, _fps) = select_format(&dev, max_size)?;
     let width = fmt.width;
     let height = fmt.height;
     let source_fourcc = fmt.fourcc;
-    drop(dev);
-    let mut last_err = None;
-    let mut pipeline = None;
-    let mut appsink = None;
-    if source_fourcc == FourCC::new(b"MJPG") {
-        if let Some(decoder) = mjpeg_decoder() {
-            match build_pipeline(id, source_fourcc, width, height, Some(decoder)) {
-                Ok((p, s)) => {
-                    pipeline = Some(p);
-                    appsink = Some(s);
-                }
-                Err(e) => last_err = Some(e),
-            }
-        }
+    if source_fourcc != FourCC::new(b"MJPG") {
+        return Err(anyhow!("GStreamer MJPG only"));
     }
-    if pipeline.is_none() {
-        match build_pipeline(id, source_fourcc, width, height, None) {
-            Ok((p, s)) => {
-                pipeline = Some(p);
-                appsink = Some(s);
-            }
-            Err(e) => last_err = Some(e),
-        }
-    }
-    let pipeline = pipeline.ok_or_else(|| last_err.unwrap_or_else(|| anyhow!("GStreamer failed to play")))?;
-    let appsink = appsink.ok_or_else(|| anyhow!("GStreamer appsink missing"))?;
+    let (pipeline, appsink) = build_mjpeg_pipeline(id, width, height, fps, decoder)?;
     let info = VideoInfo {
         width,
         height,
         format: format!("{}", fmt.fourcc),
-        fps: None,
+        fps,
     };
     let handle = std::thread::Builder::new()
         .name("gst-capture".to_string())
