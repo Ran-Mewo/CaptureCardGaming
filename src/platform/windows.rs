@@ -11,6 +11,9 @@ use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::{
     CoInitializeEx, CoTaskMemFree, CoUninitialize, COINIT_MULTITHREADED,
 };
+use windows::Win32::System::Power::{
+    SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+};
 
 use crate::pixel;
 use crate::types::{ColorInfo, DeviceInfo, FrameData, VideoFormat, VideoFrame};
@@ -306,5 +309,27 @@ impl ComInit {
 impl Drop for ComInit {
     fn drop(&mut self) {
         unsafe { CoUninitialize() }
+    }
+}
+
+pub struct KeepAwake;
+
+impl KeepAwake {
+    pub fn new() -> Option<Self> {
+        let flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED;
+        let ok = unsafe { SetThreadExecutionState(flags) };
+        if ok.0 == 0 {
+            None
+        } else {
+            Some(Self)
+        }
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        unsafe {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
     }
 }

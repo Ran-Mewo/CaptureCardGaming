@@ -23,6 +23,8 @@ pub struct App {
     disable_aspect_correction: bool,
     fullscreen: bool,
     fullscreen_request: Option<bool>,
+    keep_awake: bool,
+    keep_awake_request: Option<bool>,
 }
 
 struct StatsState {
@@ -96,6 +98,8 @@ impl App {
             disable_aspect_correction: false,
             fullscreen: false,
             fullscreen_request: None,
+            keep_awake: true,
+            keep_awake_request: Some(true),
         })
     }
 
@@ -121,6 +125,10 @@ impl App {
 
     pub fn set_fullscreen_state(&mut self, fullscreen: bool) {
         self.fullscreen = fullscreen;
+    }
+
+    pub fn take_keep_awake_request(&mut self) -> Option<bool> {
+        self.keep_awake_request.take()
     }
 
     pub fn capture_size(&self) -> Option<(u32, u32)> {
@@ -184,6 +192,11 @@ impl App {
                     if ui.checkbox(&mut show_stats, "Stats").changed() {
                         self.show_stats = show_stats;
                         self.apply_stats_enabled();
+                    }
+                    let mut keep_awake = self.keep_awake;
+                    if ui.checkbox(&mut keep_awake, "Keep Awake").changed() {
+                        self.keep_awake = keep_awake;
+                        self.keep_awake_request = Some(keep_awake);
                     }
                     let mut disable_aspect = self.disable_aspect_correction;
                     if ui

@@ -4,6 +4,7 @@ use std::sync::{
 };
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::process::{Child, Command, Stdio};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
@@ -629,4 +630,33 @@ fn spawn_capture_gst(
             let _ = pipeline.set_state(gst::State::Null);
         })?;
     Ok((handle, info))
+}
+
+pub struct KeepAwake {
+    child: Child,
+}
+
+impl KeepAwake {
+    pub fn new() -> Option<Self> {
+        let child = Command::new("systemd-inhibit")
+            .arg("--what=idle:sleep")
+            .arg("--mode=block")
+            .arg("--who=CaptureCardGaming")
+            .arg("--why=CaptureCardGaming")
+            .arg("sleep")
+            .arg("infinity")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        Some(Self { child })
+    }
+}
+
+impl Drop for KeepAwake {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }

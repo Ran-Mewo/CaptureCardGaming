@@ -26,6 +26,7 @@ struct MainState {
     app: App,
     fullscreen_aspect: Option<bool>,
     fullscreen_exclusive: bool,
+    keep_awake: Option<platform::KeepAwake>,
 }
 
 impl MainState {
@@ -39,11 +40,13 @@ impl MainState {
             app: App::new()?,
             fullscreen_aspect: None,
             fullscreen_exclusive: false,
+            keep_awake: None,
         })
     }
 
     fn redraw(&mut self, window: &Window) {
         self.apply_fullscreen(window);
+        self.apply_keep_awake();
         let Some(render) = self.render.as_mut() else { return };
         let Some(egui_state) = self.egui_state.as_mut() else { return };
         let Some(egui_renderer) = self.egui_renderer.as_mut() else { return };
@@ -128,6 +131,18 @@ impl MainState {
         }
     }
 
+    fn apply_keep_awake(&mut self) {
+        if let Some(request) = self.app.take_keep_awake_request() {
+            if request {
+                if self.keep_awake.is_none() {
+                    self.keep_awake = platform::KeepAwake::new();
+                }
+            } else {
+                self.keep_awake = None;
+            }
+        }
+    }
+
     fn match_capture_mode(&self, window: &Window) -> Option<VideoModeHandle> {
         let (w, h) = self.app.capture_size()?;
         let monitor = window.current_monitor()?;
@@ -182,6 +197,7 @@ impl ApplicationHandler for MainState {
         self.egui_state = Some(egui_state);
         self.egui_renderer = Some(egui_renderer);
         self.update_target_capture_size();
+        self.apply_keep_awake();
     }
 
     fn window_event(
